@@ -49,6 +49,7 @@ DV_DIR   = r"C:\DV"
 OUT_DIR  = r"C:\FERTIG"
 TEMP_DIR = r"C:\TEMP_MUX"      # Temp-Ordner, wird pro Job als Unterordner genutzt
 DDVT_DIR = r"C:\DDVT\tools"   # Pfad zum tools-Ordner von DDVT
+
 # ============================================================
 
 FFMPEG      = os.path.join(DDVT_DIR, "ffmpeg.exe")
@@ -80,6 +81,26 @@ def setup_logging(out_dir: str) -> logging.Logger:
 # ============================================================
 #  HILFSFUNKTIONEN
 # ============================================================
+def normalize_name(stem: str) -> str:
+    """
+    Entfernt HDR/DV-Tokens aus dem Dateinamen fuer den Vergleich.
+    Erkennt Trennzeichen Punkt, Leerzeichen, Unterstrich, Bindestrich.
+    Beispiele:
+      Movie.Name.HDR.2160p  =>  movie.name.2160p
+      Movie.Name.DV.2160p   =>  movie.name.2160p
+      Film HDR 4K           =>  film 4k
+      Film.DV               =>  film
+    """
+    import re
+    # Tokens die entfernt werden (Gross/Kleinschreibung egal)
+    tokens = r'(?<![A-Za-z])(HDR10|HDR|DV|DoVi|Dolby[\s._-]?Vision)(?![A-Za-z])'
+    result = re.sub(tokens, '', stem, flags=re.IGNORECASE)
+    # Mehrfache Trennzeichen zusammenfuehren die durch das Entfernen entstehen
+    result = re.sub(r'[._\- ]{2,}', '.', result)
+    result = result.strip('._- ')
+    return result.lower()
+
+
 def run(args: list, log: logging.Logger) -> int:
     """Fuehrt Prozess aus, loggt Output, gibt Exit-Code zurueck."""
     log.debug("  > " + " ".join(
@@ -345,6 +366,7 @@ def main():
         sys.exit(1)
 
     hdr_files = sorted(Path(HDR_DIR).glob("*.mkv"))
+    dv_files  = sorted(Path(DV_DIR).glob("*.mkv"))
     total   = len(hdr_files)
     ok      = 0
     skipped = 0
@@ -354,16 +376,35 @@ def main():
         log.warning(f"Keine MKV-Dateien in {HDR_DIR} gefunden.")
         sys.exit(0)
 
+    # DV-Dateien per normalisiertem Namen indexieren
+    # z.B. "movie.name.2160p" => Path(...DV...)
+    dv_index = {}
+    for dv_path in dv_files:
+        key = normalize_name(dv_path.stem)
+        dv_index[key] = dv_path
+
+    log.info(f"HDR-Dateien gefunden : {total}")
+    log.info(f"DV-Dateien gefunden  : {len(dv_files)}")
+
     for idx, hdr_path in enumerate(hdr_files, 1):
-        dv_path  = Path(DV_DIR)  / hdr_path.name
         out_path = Path(OUT_DIR) / hdr_path.name
 
         log.info("")
         log.info("-" * 60)
         log.info(f"[{idx}/{total}]  {hdr_path.stem}")
 
-        if not dv_path.is_file():
-            log.warning(f"  SKIP: Kein passender DV-File in {DV_DIR}")
+        # Passende DV-Datei suchen: zuerst exakter Name, dann normalisiert
+        hdr_key = normalize_name(hdr_path.stem)
+        if (Path(DV_DIR) / hdr_path.name).is_file():
+            dv_path = Path(DV_DIR) / hdr_path.name
+            log.info(f"  Match (exakt)      : {dv_path.name}")
+        elif hdr_key in dv_index:
+            dv_path = dv_index[hdr_key]
+            log.info(f"  Match (normalisiert): {dv_path.name}")
+        else:
+            log.warning(f"  SKIP: Kein passender DV-File gefunden.")
+            log.warning(f"        HDR-Key : {hdr_key}")
+            log.warning(f"        DV-Keys : {', '.join(sorted(dv_index.keys()))}")
             skipped += 1
             continue
 
